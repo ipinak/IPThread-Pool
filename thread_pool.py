@@ -86,6 +86,18 @@ class ThreadPool(TaskDelegate):
 
 		maxThreads = property(**maxThreads())
 
+	def pSize():
+		"""
+		Return the number of items in the pool.
+		"""
+		return self.pool.qsize()
+
+	def waitingPSize():
+		"""
+		Return the number of items in the waiting pool.
+		"""
+		return self.waitingPool.qsize()
+
 	def addTask(self, task):
 		"""
 		Add the task in the pool to run it, or put it in the
