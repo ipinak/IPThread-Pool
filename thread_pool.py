@@ -40,7 +40,12 @@ import Queue
 
 from debug_sym import debug
 
-DEFAULT_MAX_THREADS = 7
+
+# This is set due to the fact, that a lot of CPUs support 
+# 4-8 hardware threads though it's not always the case since
+# this is true for general purpose computers, rather for 
+# servers.
+DEFAULT_MAX_THREADS = 8
 
 def singleton(cls):
     """
@@ -50,9 +55,6 @@ def singleton(cls):
     instance.__call__ = lambda: instance
     return instance
 
-#
-# TODO - Fix the pool, when the user updates the maximum number of threads
-# it should notify the corresponding module or class about the change.
 #
 # TODO - test execution of the tasks and the delegate functionality. 
 # (almost done)
@@ -65,189 +67,188 @@ def singleton(cls):
 #
 
 class TaskDelegate(object):
-	"""
-	A task delegate for notifying when a task has completed.
-	"""
-	def __call__(self):
-		pass
+    """
+    A task delegate for notifying when a task has completed.
+    """
+    def __call__(self):
+        pass
+    
+    def notify(self):
+        pass
 
-	def notify(self):
-		pass
-
-	def __repr__(self):
-		return "<%s : %s>" % (self.__class__.__name__, hex(id(self)))
+    def __repr__(self):
+        return "<%s: %s>" % (self.__class__.__name__, hex(id(self)))
+    
+    def __str__(self):
+        return "<%s: %s>" % (self.__class__.__name__, hex(id(self)))
 
 
 # Create two locks for each queue.
 pLock = threading.Lock() # pool lock.
-cv = threading.Condition()
+eLock = threading.Lock() # execution lock.
 
-# Now that it is singleton, you might have threading problems, check
-# all the synchronization primitives.
-# TODO - make the thread pool a separate thread.
-#@singleton
+
 class ThreadPool(TaskDelegate):
-	"""
-	Threading mechanism using a simple pool.
-	"""
-	def __init__(self, maxThreads=DEFAULT_MAX_THREADS):
-		if debug: print "%s.__init__()" % self.__class__.__name__
-		self.maxThreads = maxThreads
-		self.pool = Queue.Queue(maxThreads)
-		self.waitingPool = Queue.Queue()
+    """
+    Threading mechanism using a simple pool.
+    """
+    def __init__(self, maxThreads=DEFAULT_MAX_THREADS):
+        if debug: print "%s.__init__()" % self.__class__.__name__
+        
+        self.maxThreads = maxThreads
+        self.pool = Queue.Queue()
+        self.waitingPool = Queue.Queue()
 
-		def maxThreads():
-			doc = "The maximum number of threads property."
+        def maxThreads():
+            doc = "The maximum number of threads property."
+            
+            def fget(self):
+                return self._maxThreads
+            
+            def fset(self, maxThreads):
+                self._maxThreads = maxThreads
+                
+            def fdel(self):
+                del self._maxThreads
 
-			def fget(self):
-				return self._maxThreads
+            return locals()
 
-			def fset(self, maxThreads):
-				self._maxThreads = maxThreads
-				# TODO - recreate the queue with bigger size.
+        maxThreads = property(**maxThreads())
+            
+    def __repr__(self):
+        return "<%s: %s>" % (self.__class__.__name__, hex(id(self)))
 
-			def fdel(self):
-				del self._maxThreads
-			
-			return locals()
+    def __str__(self):
+        return "<%s: %s - pool(%d) - waiting(%d) - maxThreads(%d)>" % (self.__class__.__name__, hex(id(self)), self.waitingPSize(), self.pSize(), self.maxThreads)
 
-		maxThreads = property(**maxThreads())
+    def pSize(self):
+        """
+        Return the number of items in the pool.
+        """
+        return self.pool.qsize()
+        
+    def waitingPSize(self):
+        """
+        Return the number of items in the waiting pool.
+        """
+        return self.waitingPool.qsize()
+    
+    def addTask(self, task):
+        """
+        Add the task in the pool to run it, or put it in the
+        waiting pool for later execution. The queue is limited 
+        from your or by default is 7 tasks. The waiting pool is
+        unlimited, since it's implemented using a list.
+        """
+        if debug: print "%s.addTask()" % (self.__class__.__name__)
+        
+        assert isinstance(task, Task)
+            
+        # If the queue has more tasks running, than the
+        # user specified, then put it in the waiting queue.
+        if debug: print "One step before the lock"
+        pLock.acquire()
+        if debug: print "Passed lock"
+            
+        if self.pool.qsize() < self.maxThreads:
+            self.pool.put(task)
+            pLock.release()
+        else:
+            self.waitingPool.put(task)
+            pLock.release()
 
-	def __repr__(self):
-		return "ThreadPool"
-
-	def __str__(self):
-		return "[%s - waiting: %d - pool: %d]" % (self.__class__.__name__, self.waitingPool.qsize(), self.pool.size())
-
-	def __call__(self):
-		print "<%s : %s>" % (self.__class__.__name__, hex(id(self)))
-
-	def pSize(self):
-		"""
-		Return the number of items in the pool.
-		"""
-		return self.pool.qsize()
-
-	def waitingPSize(self):
-		"""
-		Return the number of items in the waiting pool.
-		"""
-		return self.waitingPool.qsize()
-
-	def addTask(self, task):
-		"""
-		Add the task in the pool to run it, or put it in the
-		waiting pool for later execution. The queue is limited 
-		from your or by default is 7 tasks. The waiting pool is
-		unlimited, since it's implemented using a list.
-		"""
-		if debug: print "%s.addTask()" % (self.__class__.__name__)
-
-		assert isinstance(task, Task)
+    def addTasks(self, tasks):
+        """
+        Add tasks in the pool to run it, or put it in the
+        waiting pool for later execution. The queue is limited 
+        from your or by default is 7 tasks. The waiting pool is
+        unlimited, since it's implemented using a list.
+        """
+        if debug: print "%s.addTasks()" % (self.__class__.__name__)
+            
+        assert isinstance(tasks, Queue.Queue)
+            
+        map(self.addTask, tasks)
+            
+    def execute_tasks(self):
+        """
+        Run every task on a different thread.
+        """
+        if debug: print "%s.execute_tasks()" % (self.__class__.__name__)
 		
-		# If the queue has more tasks running, than the
-		# user specified, then put it in the waiting queue.
-		pLock.acquire()
-		if self.pool.qsize() < self.maxThreads:
-			self.pool.put(task)
-			pLock.release()
-		else:
-			self.waitingPool.put(task)
-			pLock.release()
+        while not self.pool.empty():
+            eLock.acquire()
+            r_task = self.pool.get()
+            eLock.release()
+            r_task()
 
-	def addTasks(self, tasks):
-		"""
-		Add tasks in the pool to run it, or put it in the
-		waiting pool for later execution. The queue is limited 
-		from your or by default is 7 tasks. The waiting pool is
-		unlimited, since it's implemented using a list.
-		"""
-		if debug: print "%s.addTasks()" % self.__class__.__name__
-		
-		assert isinstance(tasks, Queue.Queue)
+    def notify(self, res):
+        """
+        Remove the completed task from the list and replace it with a 
+        new task.
+        """
+        if debug: print "%s.notify()" % self.__class__.__name__
 
-		map(self.addTask, tasks)
+        # Remove a Task from the waiting pool and put it in the queue.
+        pLock.acquire()
+        if not self.waitingPool.empty():
+            newTask = self.waitingPool.get()
+            pLock.release()
 
-	def execute_tasks(self):
-		"""
-		Run every task on a different thread.
-		"""
-		if debug: print "%s.execute_tasks()" % self.__class__.__name__
-		
-		while not self.pool.empty():
-			pLock.acquire()
-			r_task = self.pool.get()
-			pLock.release()
-			r_task()
-
-	def notify(self, res):
-		"""
-		Remove the completed task from the list and replace it with a 
-		new task.
-		"""
-		if debug: print "%s.notify()" % self.__class__.__name__
-
-		# Remove a Task from the waiting pool and put it in the queue.
-		pLock.acquire()
-		if not self.waitingPool.empty():
-			newTask = self.waitingPool.get()
-			pLock.release()
-
-			pLock.acquire()
-			self.pool.put(newTask)
-			pLock.release()
-		else:
-			pLock.release()
-
-
+            pLock.acquire()
+            self.pool.put(newTask)
+            pLock.release()
+        else:
+            pLock.release()
+                
+                
 # This could be used as a decorator.
 class Task(threading.Thread):
-	"""
-	A simple task to execute. It executes, when you either invoke 
-	__call__() the class or execute() method.
-	"""
-	def __init__(self, func, delegate, args=None):
-		if debug: print self.__class__.__name__
-		# TODO - comment this out.
-		assert isinstance(delegate, TaskDelegate), "You must provide a TaskDelegate."
-		threading.Thread.__init__(self)
-		self.func = func
-		self.args = args
-		self.delegate = delegate
+    """
+    A simple task to execute. It executes, when you either invoke 
+    __call__() the class or execute() method.
+    """
+    def __init__(self, func, delegate, args=None):
+        if debug: print self.__class__.__name__
+       	# TODO - comment this out.
+        assert isinstance(delegate, TaskDelegate), "You must provide a TaskDelegate."
+        threading.Thread.__init__(self)
+        self.func = func
+        self.args = args
+        self.delegate = delegate
 
-	def __call__(self):
-		if debug: print "%s.__call__()" % (self.__class__.__name__)
-		self.run()
+    def __call__(self):
+        if debug: print "%s.__call__()" % (self.__class__.__name__)
+        self.run()
 
-	def run(self):
-		"""
-		The subclass of Task should implement this and notify
-		the delegate when the execution has finished.
-		"""
-		if debug: print "%s.run()" % (self.__class__.__name__)
-
-		# Execute the function with the given arguments.
-		if debug: print "R"
-		res = self.func()
-
-		# Pass the task itself and the result after the execution.
-		self.delegate.notify(res)
+    def run(self):
+        """
+        The subclass of Task should implement this and notify
+        the delegate when the execution has finished.
+        """
+        if debug: print "%s.run()" % (self.__class__.__name__)
+        
+        # Execute the function with the given arguments.
+        if debug: print "R"
+        res = self.func()
+            
+        # Pass the task itself and the result after the execution.
+        self.delegate.notify(res)
 
 
 class EmptyException(Exception):
-	"""
-	"""
-	def __init__(self, name):
-		self.name = self.__class__.__name__
+    """
+    """
+    def __init__(self, name):
+        self.name = self.__class__.__name__
+        
+    def __str__(self):
+        return repr(self.name)
 
-	def __str__(self):
-		return repr(self.name)
-
-	def __repr__(self):
-		return "<%s : %s>" % (self.__class__.__name__, hex(id(self)))
+    def __repr__(self):
+        return "<%s : %s>" % (self.__class__.__name__, hex(id(self)))
 	
-	def __unicode__(self):
-		return "[%s: %s]" % (self.__class__.__name__, 
-						 self.name)
+    def __unicode__(self):
+        return "[%s: %s]" % (self.__class__.__name__, self.name)
 
 
