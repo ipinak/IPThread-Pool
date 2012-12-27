@@ -17,7 +17,7 @@ def log():
    print "\n"
 
 t = thread_pool.ThreadPool()
-for i in range(40):
+for i in range(50):
    t.addTask(thread_pool.Task(tt, t))
 
 

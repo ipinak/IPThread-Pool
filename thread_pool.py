@@ -75,7 +75,7 @@ class TaskDelegate(object):
 	def __call__(self):
 		pass
 	
-	def notify(self, thread, result):
+	def notify(self):
 		pass
 	
 	def __repr__(self):
@@ -87,9 +87,7 @@ class TaskDelegate(object):
 
 # Create two locks for each queue.
 pLock = threading.Lock() # pool lock.
-eLock = threading.Lock() # execution lock.
-cvProducer = threading.Condition()
-cvConsumer = threading.Condition()
+consumer = threading.Condition()
 
 class ThreadPool(TaskDelegate):
 	"""
@@ -152,25 +150,8 @@ class ThreadPool(TaskDelegate):
 
 		# If the queue has more tasks running, than the
 		# user specified, then put it in the waiting queue.
-		if debug: print "One step before the lock"
 		pLock.acquire()
-		if debug: print "Passed lock"
-
 		if self.pool.qsize() < self.processes:
-			# Create the running thread either from reusing a thread
-			# from that was set to idle or by creating a new one.
-			
-			#tmp = None
-			#try:
-			#	if not self.idleThreadPool.empty():
-			#		tmp = self.idleThreadPool.get()
-			#		assert isinstance(tmp, Task)
-			#		tmp.func = task # assign the task to execute.
-			#else:
-			#		tmp = Task(task, self)
-			#except Queue.Empty, e:
-			#	print "%s - %s" % (e.status, e.message)
-			#self.pool.put(tmp)
 			self.pool.put(task)
 			pLock.release()
 		else:
@@ -181,7 +162,7 @@ class ThreadPool(TaskDelegate):
 		"""
 		Add tasks in the pool to run it, or put it in the
 		waiting pool for later execution. The queue is limited 
-		from your or by default is 7 tasks. The waiting pool is
+		from your or by default is 8 tasks. The waiting pool is
 		unlimited, since it's implemented using a list.
 		"""
 		if debug: 
@@ -197,63 +178,53 @@ class ThreadPool(TaskDelegate):
 		
 		# One condition object here to execute new tasks.
 		# Execute in FIFO order.
-		cvConsumer.acquire()
-		while self.pool.empty():
-			print "Waiting..."
-			cvConsumer.wait()
-		cvConsumer.release()
+		consumer.acquire()
+		# Get the new item to consume.
 		while not self.pool.empty():
-			#eLock.acquire()
 			r_task = self.pool.get()
-			print "before"
-			#eLock.release()
-			assert isinstance(r_task, Task), "not a task"
+			assert isinstance(r_task, Task), "Not a task"
 			r_task.start()
-			print "after"
+			if self.pool.empty() and not self.waitingPool.empty():
+				if debug: print "Waiting..."
+				consumer.wait()
+		consumer.release()
 
-	def notify(self, thread, result):
+	def notify(self):
 		"""
 		Remove the completed task from the list and replace it with a 
 		new task. The new task is assigned to the previously running 
-		thread (improves performance, since we don't have any thread
-		creation overhead).
+		thread.
 		"""
-		if debug: 
-			print "%s.notify()" % (self.__class__.__name__)
+		if debug: print "%s.notify()" % (self.__class__.__name__)
+		
 		# Remove a Task from the waiting pool and put it in the queue.
 		pLock.acquire()
 		if not self.waitingPool.empty():
 			# Get the task that you want to execute.
 			newTask = self.waitingPool.get()
 			pLock.release()
-
-			pLock.acquire()
-			# For the finished thread, assign a new task and then
-			# put it back in the pool for execution.
-			cvProducer.acquire()
+			
+			consumer.acquire()
+			# Make a new item for consumption.
 			self.pool.put(newTask)
-			cvProducer.notifyAll()
-			cvProducer.release()
-			print "evale %s" % newTask
-			pLock.release()
+			consumer.notifyAll()
+			consumer.release()
 		else:
 			# Keep the thread in the idle pool.
-			#self.idleThreadPool.put(thread)
 			pLock.release()
 
 
-# This could be used as a decorator.
 class Task(threading.Thread):
 	"""
-	A simple task to execute. It executes, when you either invoke 
-	__call__() the class or execute() method.
+	A simple task to execute. It executes, when you invoke thr.start()
 	"""
-	def __init__(self, func, delegate, args=None):
+	def __init__(self, func, delegate, args=None, callback=None):
 		if debug: print "%s.__init__()" % (self.__class__.__name__)
 		assert isinstance(delegate, TaskDelegate), "You must provide a TaskDelegate."
 		self.func = func
 		self.args = args
 		self.delegate = delegate
+		self.callback = callback
 		threading.Thread.__init__(self)
 
 	def __call__(self):
@@ -271,6 +242,8 @@ class Task(threading.Thread):
 
 		# Execute the function with the given arguments.
 		res = self.func()
+		if self.callback != None:
+			self.callback(res)
 		
 		# Pass the task itself and the result after the execution.
-		self.delegate.notify(self, res)
+		self.delegate.notify()
