@@ -38,8 +38,7 @@ policies, either expressed or implied, of the FreeBSD Project.
 import threading
 import Queue
 
-from debug_sym import debug
-
+from debug_sym import debug, enable_debugger
 
 # This is set due to the fact, that a lot of CPUs support 
 # 4-8 hardware threads though it's not always the case since
@@ -56,19 +55,10 @@ def singleton(cls):
 	return instance
 
 #
-# TODO - test execution of the tasks and the delegate functionality. 
-# (almost done)
-#
-# TODO - fix the queuing mechanism for threading. You will setup a number of 
-# threads, but the number of tasks should be independent of the number of 
-# threads.
-# So, you will able to add as many tasks as you like, but the pool will only 
-# execute tasks that don't exceed the maximum number of threads.
-#
 # TODO - use the args in the task, so you can pass something upon execution.
 #
 
-class TaskDelegate(object):
+class ProcessDelegate(object):
 	"""
 	A task delegate for notifying when a task has completed.
 	"""
@@ -78,9 +68,6 @@ class TaskDelegate(object):
 	def notify(self):
 		pass
 	
-	def __repr__(self):
-		return "<%s: %s>" % (self.__class__.__name__, hex(id(self)))
-	
 	def __str__(self):
 		return "<%s: %s>" % (self.__class__.__name__, hex(id(self)))
 
@@ -89,7 +76,7 @@ class TaskDelegate(object):
 pLock = threading.Lock() # pool lock.
 consumer = threading.Condition()
 
-class ThreadPool(TaskDelegate):
+class ThreadPool(ProcessDelegate):
 	"""
 	Threading mechanism using a simple pool.
 	"""
@@ -117,10 +104,7 @@ class ThreadPool(TaskDelegate):
 			return locals()
 
 		processes = property(**processes())
-			
-	def __repr__(self):
-		return "<%s: %s>" % (self.__class__.__name__, hex(id(self)))
-
+	
 	def __str__(self):
 		return "<%s: %s - pool(%d) - waiting(%d) - idleThreads(%d) - processes(%d)>" % (self.__class__.__name__, hex(id(self)), self.waitingPSize(), self.pSize(), self.idlePSize(), self.processes)
 
@@ -136,17 +120,17 @@ class ThreadPool(TaskDelegate):
 		"""
 		return self.waitingPool.qsize()
 
-	def addTask(self, task):
+	def addProcess(self, task):
 		"""
 		Add the task in the pool to run it, or put it in the
 		waiting pool for later execution. The queue is limited 
 		from your or by default is 8 tasks. The waiting pool is
 		unlimited, since it's implemented using a list.
 		"""
-		if debug: print "%s.addTask()" % (self.__class__.__name__)
+		if debug: print "%s.addProcess()" % (self.__class__.__name__)
 		
 		# Don't need it right now.
-		assert isinstance(task, Task)
+		assert isinstance(task, Process)
 
 		# If the queue has more tasks running, than the
 		# user specified, then put it in the waiting queue.
@@ -158,7 +142,7 @@ class ThreadPool(TaskDelegate):
 			self.waitingPool.put(task)
 			pLock.release()
 
-	def addTasks(self, tasks):
+	def addProcesses(self, processes):
 		"""
 		Add tasks in the pool to run it, or put it in the
 		waiting pool for later execution. The queue is limited 
@@ -166,8 +150,8 @@ class ThreadPool(TaskDelegate):
 		unlimited, since it's implemented using a list.
 		"""
 		if debug: 
-			print "%s.addTasks()" % (self.__class__.__name__)
-		map(self.addTask, tasks)
+			print "%s.addProcesses()" % (self.__class__.__name__)
+		map(self.addProcess, processes)
 
 	def execute_tasks(self):
 		"""
@@ -182,9 +166,9 @@ class ThreadPool(TaskDelegate):
 		# Get the new item to consume.
 		while not self.pool.empty():
 			r_task = self.pool.get()
-			assert isinstance(r_task, Task), "Not a task"
+			assert isinstance(r_task, Process), "Not a task"
 			r_task.start()
-			if self.pool.empty() and not self.waitingPool.empty():
+			while self.pool.empty() and not self.waitingPool.empty():
 				if debug: print "Waiting..."
 				consumer.wait()
 		consumer.release()
@@ -197,16 +181,16 @@ class ThreadPool(TaskDelegate):
 		"""
 		if debug: print "%s.notify()" % (self.__class__.__name__)
 		
-		# Remove a Task from the waiting pool and put it in the queue.
+		# Remove a Process from the waiting pool and put it in the queue.
 		pLock.acquire()
 		if not self.waitingPool.empty():
 			# Get the task that you want to execute.
-			newTask = self.waitingPool.get()
+			newProcess = self.waitingPool.get()
 			pLock.release()
 			
 			consumer.acquire()
 			# Make a new item for consumption.
-			self.pool.put(newTask)
+			self.pool.put(newProcess)
 			consumer.notifyAll()
 			consumer.release()
 		else:
@@ -214,14 +198,24 @@ class ThreadPool(TaskDelegate):
 			pLock.release()
 
 
-class Task(threading.Thread):
+class Process(threading.Thread):
 	"""
-	A simple task to execute. It executes, when you invoke thr.start()
+	A simple process to assign your work. It can be used
+	individually by invoking start() or but assigning it to a 
+	thread pool along with other processes.
 	"""
-	def __init__(self, func, delegate, args=None, callback=None):
+	def __init__(self, function, delegate=None, args=None, callback=None):
+		"""
+		The constructor of a Process object.
+		@param function - the function you want to execute.
+		@param delegate - this should be the created pool.
+		@param args - the passed arguments for the function.
+		@param callback - the callback to execute when the process finishes
+		"""
 		if debug: print "%s.__init__()" % (self.__class__.__name__)
-		assert isinstance(delegate, TaskDelegate), "You must provide a TaskDelegate."
-		self.func = func
+		if delegate != None:
+			assert isinstance(delegate, ProcessDelegate), "You must provide a ProcessDelegate."
+		self.function = function
 		self.args = args
 		self.delegate = delegate
 		self.callback = callback
@@ -232,18 +226,53 @@ class Task(threading.Thread):
  
 	def __str__(self):
 		return "<%s: %s>" % (self.__class__.__name__, hex(id(self)))
+	
+	def __unicode__(self):
+		return u"<%s: %s>" % (self.__class__.__name__, hex(id(self)))
 		
 	def run(self):
 		"""
-		The subclass of Task should implement this and notify
+		The subclass of Process should implement this and notify
 		the delegate when the execution has finished.
+		@warning this should never be called, rather the start()
 		"""
 		if debug: print "%s.run()" % (self.__class__.__name__)
 
 		# Execute the function with the given arguments.
-		res = self.func()
-		if self.callback != None:
-			self.callback(res)
+		res = None
+		if self.args != None:
+			res = self.function(args)
+		else:
+			res = self.function()
 		
-		# Pass the task itself and the result after the execution.
-		self.delegate.notify()
+		
+		# Get the next process to execute.
+		try:
+			self.delegate.notify()
+		except AttributeError, e:
+			pass
+		else:
+			print "Error - Unknown error occurred"
+
+		try:
+			self.callback([res])
+		except TypeError, e:
+			pass
+
+
+def runMethod():
+	import time
+	time.sleep(3)
+
+def callb(*args):
+	print "Callbacking..."
+	print "%s" % args
+
+
+#enable_debugger()
+if __name__ == "__main__":
+	t1 = Process(function=runMethod, callback=callb)
+	t1.start()
+	
+	t2 = Process(function=runMethod)
+	t2.start()

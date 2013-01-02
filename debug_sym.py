@@ -39,3 +39,12 @@ policies, either expressed or implied, of the FreeBSD Project.
 # get the debug standard debug variable, unless set explicitly
 # this is always True.
 debug = __debug__
+
+
+def enable_debugger():
+    if debug:
+        try:
+            import pdb
+            pdb.set_trace()
+        except ImportError, e:
+            print "Import of debugger failed."
